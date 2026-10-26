@@ -11,7 +11,7 @@ try {
     Invoke-Checked git @("submodule", "update", "--init", "--recursive")
     Invoke-Checked cmake @("-S", ".", "-B", $BuildDirectory, "-G", "Ninja",
         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-        "-DENABLE_QT=ON", "-DENABLE_SDL2=ON", "-DENABLE_SDL2_FRONTEND=OFF",
+        "-DENABLE_QT=ON", "-DENABLE_SDL2=ON",
         "-DENABLE_TESTS=ON", "-DENABLE_FFMPEG=OFF", "-DENABLE_OPENAL=OFF",
         "-DENABLE_SCRIPTING=OFF", "-DENABLE_WEB_SERVICE=OFF", "-DENABLE_LTO=OFF",
         "-DENABLE_QT_UPDATE_CHECKER=OFF", "-DENABLE_QT_TRANSLATION=OFF")
