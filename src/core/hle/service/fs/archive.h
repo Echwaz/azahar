@@ -303,6 +303,10 @@ public:
     void RegisterSelfNCCH(Loader::AppLoader& app_loader);
 
     void RegisterArticSaveDataSource(std::shared_ptr<Network::ArticBase::Client>& client);
+    void RegisterArticDockSaveDataSource(std::shared_ptr<Network::ArticBase::Client>& client,
+                                        u64 title, u8 media);
+
+    void RegisterArticDockExtData(std::shared_ptr<Network::ArticBase::Client>& client, u64 title, u64 id);
 
     void RegisterArticExtData(std::shared_ptr<Network::ArticBase::Client>& client);
 

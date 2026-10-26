@@ -6,6 +6,8 @@
 
 #include <memory>
 #include <string>
+#include <map>
+#include <set>
 #include <boost/serialization/export.hpp>
 #include <boost/serialization/string.hpp>
 #include "core/file_sys/archive_backend.h"
@@ -37,6 +39,13 @@ public:
 
     void RegisterArtic(std::shared_ptr<Network::ArticBase::Client>& client) {
         artic_client = client;
+        dock_mode = false;
+    }
+
+    void RegisterArticDock(std::shared_ptr<Network::ArticBase::Client>& client, u64 title, u8 media) {
+        artic_client = client;
+        dock_mode = true;
+        dock_titles[title] = media;
     }
 
     bool IsUsingArtic() const {
@@ -46,6 +55,9 @@ public:
 private:
     std::string mount_point;
     std::shared_ptr<Network::ArticBase::Client> artic_client = nullptr;
+    bool dock_mode = false;
+    std::map<u64, u8> dock_titles;
+    std::set<u64> backed_up_titles;
 
     ArchiveSource_SDSaveData() = default;
     template <class Archive>
@@ -55,6 +67,8 @@ private:
     }
     friend class boost::serialization::access;
 };
+
+bool BackupDockExtData(ArchiveBackend& archive, u64 title, u64 id);
 
 } // namespace FileSys
 

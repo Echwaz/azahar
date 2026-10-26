@@ -232,6 +232,7 @@ void FS_USER::OpenFileDirectly(Kernel::HLERequestContext& ctx) {
             if (async_data->archive_handle.Failed()) {
                 rb.Push(async_data->archive_handle.Code());
                 rb.PushMoveObjects<Kernel::Object>(nullptr);
+                return;
             }
 
             rb.Push(async_data->file.first.Code());
@@ -1020,7 +1021,7 @@ void FS_USER::CardSlotIsInserted(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
     IPC::RequestBuilder rb = rp.MakeBuilder(2, 0);
     rb.Push(ResultSuccess);
-    rb.Push(!system.GetCartridge().empty());
+    rb.Push(!system.GetCartridge().empty() || system.GetArticCartridgeTitle().has_value());
     LOG_DEBUG(Service_FS, "called");
 }
 
@@ -1715,7 +1716,7 @@ void FS_USER::RegisterProgramInfo(u32 process_id, u64 program_id, const std::str
         media_type = GetMediaTypeFromPath(filepath);
     }
 
-    program_info_map.insert_or_assign(process_id, ProgramInfo{program_id, media_type});
+    RegisterProgramInfo(process_id, program_id, media_type);
     if (media_type == MediaType::GameCard) {
         current_gamecard_path = filepath;
     }
@@ -1723,6 +1724,10 @@ void FS_USER::RegisterProgramInfo(u32 process_id, u64 program_id, const std::str
 
 std::string FS_USER::GetRegisteredGamecardPath() const {
     return current_gamecard_path;
+}
+
+void FS_USER::RegisterProgramInfo(u32 process_id, u64 program_id, MediaType media_type) {
+    program_info_map.insert_or_assign(process_id, ProgramInfo{program_id, media_type});
 }
 
 void FS_USER::RegisterProductInfo(u32 process_id, const ProductInfo& product_info) {

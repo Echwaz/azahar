@@ -286,6 +286,10 @@ ResultVal<std::size_t> NCCHFile::Read(const u64 offset, const std::size_t length
                                       u8* buffer) const {
     LOG_TRACE(Service_FS, "called offset={}, length={}", offset, length);
 
+    if (offset >= file_buffer.size()) {
+        return std::size_t{0};
+    }
+
     std::size_t available_size = static_cast<std::size_t>(file_buffer.size() - offset);
     std::size_t copy_size = std::min(length, available_size);
     std::memcpy(buffer, file_buffer.data() + offset, copy_size);

@@ -3,6 +3,14 @@
 // Refer to the misc/licenses/gplv2.txt file included.
 
 #include "archive_artic.h"
+#include <algorithm>
+#include "common/swap.h"
+#include "common/settings.h"
+#include "core/file_sys/archive_ncch.h"
+#include "core/file_sys/errors.h"
+#include "core/file_sys/ivfc_archive.h"
+#include "core/loader/smdh.h"
+#include "network/artic_base/title_reader.h"
 
 namespace FileSys {
 
@@ -79,7 +87,8 @@ ResultVal<std::unique_ptr<ArchiveBackend>> ArticArchive::Open(
     }
 
     return std::make_unique<ArticArchive>(client, *handle_opt, report_artic_event, cache_provider,
-                                          path, clear_cache_on_close);
+                                          path, clear_cache_on_close,
+                                          archive_id == Service::FS::ArchiveIdCode::NCCH);
 }
 
 void ArticArchive::Close() {
@@ -103,6 +112,49 @@ std::string ArticArchive::GetName() const {
 
 ResultVal<std::unique_ptr<FileBackend>> ArticArchive::OpenFile(const Path& path, const Mode& mode,
                                                                u32 attributes) {
+    if (ncch_archive && mode.read_flag && !mode.write_flag && !mode.create_flag) {
+        if (archive_path.GetType() != LowPathType::Binary || path.GetType() != LowPathType::Binary) {
+            return ResultInvalidPath;
+        }
+        const auto archive_data = archive_path.AsBinary();
+        const auto file_data = path.AsBinary();
+        if (archive_data.size() != 16 || file_data.size() != 20) {
+            return ResultInvalidPath;
+        }
+        u32_le open_type, index, kind, media;
+        u64_le title_id;
+        std::memcpy(&open_type, file_data.data(), sizeof(open_type));
+        std::memcpy(&index, file_data.data() + 4, sizeof(index));
+        std::memcpy(&kind, file_data.data() + 8, sizeof(kind));
+        std::memcpy(&title_id, archive_data.data(), sizeof(title_id));
+        std::memcpy(&media, archive_data.data() + 8, sizeof(media));
+        media = static_cast<u32>(media) & 0xFF;
+        if (open_type == 0 && index == 0 && kind == 2) {
+            if (media > 2) {
+                return ResultInvalidPath;
+            }
+            const auto* name = reinterpret_cast<const char*>(file_data.data() + 12);
+            const auto end = std::find(name, name + 8, '\0');
+            Network::ArticBase::TitleReader reader(client, {title_id, static_cast<u8>(media)});
+            auto section = reader.ReadExeFS(std::string_view(name, end - name));
+            if (!section) {
+                if (const auto error = reader.GetLastOpenError()) {
+                    return Result(*error);
+                }
+                return ResultUnknown;
+            }
+            if (Settings::values.apply_region_free_patch &&
+                std::string_view(name, end - name) == "icon" &&
+                Loader::IsValidSMDH(*section)) {
+                const u32_le region_free = 0x7FFFFFFF;
+                std::memcpy(section->data() + offsetof(Loader::SMDH, region_lockout),
+                            &region_free, sizeof(region_free));
+            }
+            // Serve partial guest reads from RAM after one complete console ExeFS read.
+            return std::make_unique<NCCHFile>(std::move(*section),
+                                              std::make_unique<ExeFSDelayGenerator>());
+        }
+    }
     if (mode.create_flag) {
         auto cache = cache_provider->ProvideCache(
             client, cache_provider->PathsToVector(archive_path, path), false);
@@ -524,6 +576,7 @@ ArticDirectoryBackend::~ArticDirectoryBackend() {
 }
 
 u32 ArticDirectoryBackend::Read(const u32 count, Entry* entries) {
+    read_failed = false;
     auto req = client->NewRequest("FSDIR_Read");
 
     req.AddParameterS32(dir_handle);
@@ -531,11 +584,15 @@ u32 ArticDirectoryBackend::Read(const u32 count, Entry* entries) {
 
     auto resp = client->Send(req);
     auto res = ArticArchive::RespResult(resp);
-    if (res.IsError())
+    if (res.IsError()) {
+        read_failed = true;
         return 0;
+    }
 
     auto entry_buf = resp->GetResponseBuffer(0);
-    if (!entry_buf) {
+    if (!entry_buf || entry_buf->second % sizeof(Entry) != 0 ||
+        entry_buf->second / sizeof(Entry) > count) {
+        read_failed = true;
         return 0;
     }
     u32 ret_count = static_cast<u32>(entry_buf->second / sizeof(Entry));

@@ -5,7 +5,13 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
+#include <limits>
+#include <mutex>
 #include <shared_mutex>
+#include <vector>
+#include <thread>
 #include <boost/serialization/array.hpp>
 #include <boost/serialization/base_object.hpp>
 #include <boost/serialization/export.hpp>
@@ -14,7 +20,9 @@
 #include "common/file_util.h"
 #include "common/static_lru_cache.h"
 #include "core/file_sys/artic_cache.h"
+#include "core/file_sys/artic_disk_cache.h"
 #include "network/artic_base/artic_base_client.h"
+#include "network/artic_base/title_reader.h"
 
 namespace Loader {
 enum class ResultStatus;
@@ -93,7 +101,8 @@ private:
 class ArticRomFSReader : public RomFSReader {
 public:
     ArticRomFSReader() = default;
-    ArticRomFSReader(std::shared_ptr<Network::ArticBase::Client>& cli, bool is_update_romfs);
+    ArticRomFSReader(std::shared_ptr<Network::ArticBase::Client>& cli, bool is_update_romfs,
+                    std::optional<Network::ArticBase::TitleTarget> title = std::nullopt);
 
     ~ArticRomFSReader() override;
 
@@ -112,6 +121,8 @@ public:
     }
 
     void ClearCache() {
+        std::scoped_lock lock(remote_mutex);
+        remote_pages.clear();
         cache.Clear();
     }
 
@@ -121,6 +132,29 @@ private:
     std::shared_ptr<Network::ArticBase::Client> client;
     size_t data_size = 0;
     s32 romfs_handle = -1;
+    std::vector<u8> home_romfs;
+    std::optional<Network::ArticBase::TitleTarget> remote_title;
+    bool remote_update = false;
+    u64 remote_size{};
+    std::size_t remote_offset{};
+    static constexpr std::size_t remote_page_size = 64 * 1024;
+    Common::StaticLRUCache<std::size_t, std::vector<u8>, 128> remote_pages;
+    std::mutex remote_mutex;
+    std::mutex remote_io_mutex;
+    std::unique_ptr<ArticDiskCache> disk_cache;
+    std::thread prefetch_thread;
+    std::mutex prefetch_mutex;
+    std::condition_variable prefetch_ready;
+    std::optional<std::size_t> prefetch_page;
+    std::atomic<bool> prefetch_stopped{false};
+    std::atomic<bool> remote_invalidated{false};
+    std::atomic<unsigned> foreground_waiters{0};
+    std::atomic<std::size_t> last_read_end{std::numeric_limits<std::size_t>::max()};
+    std::atomic<u64> network_reads{0}, ram_hits{0}, disk_hits{0}, prefetched_pages{0};
+    bool FetchRemotePages(std::size_t page, std::size_t count);
+    void QueuePrefetch(std::size_t page);
+    void PrefetchLoop();
+    void StopPrefetch();
     Loader::ResultStatus load_status;
 
     ArticCache cache;

@@ -17,6 +17,9 @@ class ArticSecureValueBackend : public SecureValueBackend {
 public:
     ArticSecureValueBackend(const std::shared_ptr<Network::ArticBase::Client>& _client)
         : client(_client) {}
+    ArticSecureValueBackend(const std::shared_ptr<Network::ArticBase::Client>& client_,
+                            u64 title_, u8 media_)
+        : client(client_), title(title_), media(media_) {}
 
     Result ObsoletedSetSaveDataSecureValue(u32 unique_id, u8 title_variation, u32 secure_value_slot,
                                            u64 secure_value) override;
@@ -47,6 +50,8 @@ protected:
 
 private:
     std::shared_ptr<Network::ArticBase::Client> client;
+    u64 title = 0;
+    u8 media = 0;
 };
 } // namespace FileSys
 

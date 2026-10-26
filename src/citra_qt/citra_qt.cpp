@@ -15,6 +15,8 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPalette>
+#include <QSettings>
+#include "core/loader/artic_home_address.h"
 #include <QSysInfo>
 #include <QtConcurrent/QtConcurrentMap>
 #include <QtConcurrent/QtConcurrentRun>
@@ -1140,6 +1142,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Load_File, &GMainWindow::OnMenuLoadFile);
     connect_menu(ui->action_Install_CIA, &GMainWindow::OnMenuInstallCIA);
     connect_menu(ui->action_Connect_Artic, &GMainWindow::OnMenuConnectArticBase);
+    connect_menu(ui->action_Connect_Artic_Plus, &GMainWindow::OnMenuConnectArticBasePlus);
     connect_menu(ui->action_Setup_System_Files, &GMainWindow::OnMenuSetUpSystemFiles);
     for (u32 region = 0; region < Core::NUM_SYSTEM_TITLE_REGIONS; region++) {
         connect_menu(ui->menu_Boot_Home_Menu->actions().at(region),
@@ -1508,6 +1511,7 @@ void GMainWindow::BootGame(const QString& filename) {
     }
 
     const bool is_artic = filename.startsWith(QString::fromStdString("articbase:/")) ||
+                          filename.startsWith(QStringLiteral("artichome://")) ||
                           filename.startsWith(QString::fromStdString("articinio:/")) ||
                           filename.startsWith(QString::fromStdString("articinin:/"));
 
@@ -2472,6 +2476,35 @@ void GMainWindow::OnMenuConnectArticBase() {
     if (ok) {
         UISettings::values.last_artic_base_addr = res;
         BootGame(QString::fromStdString("articbase://").append(res));
+    }
+}
+
+void GMainWindow::OnMenuConnectArticBasePlus() {
+    QSettings dock_settings(QString::fromStdString(
+        FileUtil::GetUserPath(FileUtil::UserPath::ConfigDir) + "artic-dock.ini"), QSettings::IniFormat);
+    QSettings launcher_settings(QCoreApplication::applicationDirPath() + QStringLiteral("/dock.ini"), QSettings::IniFormat);
+    auto address = dock_settings.value("Connection/Address", launcher_settings.value(
+        "Dock/Address", UISettings::values.last_artic_base_addr)).toString();
+    while (true) {
+        QInputDialog dialog(this);
+        dialog.setWindowTitle(tr("Connect Artic Base++"));
+        dialog.setLabelText(tr("Console address (IP or hostname, optional :port):\nOpens your console's Home Menu."));
+        dialog.setInputMode(QInputDialog::TextInput);
+        dialog.setTextValue(address);
+        dialog.setOkButtonText(tr("Connect"));
+        dialog.resize(440, dialog.sizeHint().height());
+        if (dialog.exec() != QDialog::Accepted) return;
+        address = dialog.textValue().trimmed();
+        const auto url = QStringLiteral("artichome://%1/0004003000008202").arg(address);
+        if (!Loader::ParseArticHomeAddress(url.toStdString())) {
+            QMessageBox::warning(this, tr("Invalid console address"),
+                tr("Enter the console IP address or hostname, optionally followed by :port."));
+            continue;
+        }
+        dock_settings.setValue("Connection/Address", address);
+        dock_settings.sync();
+        BootGame(url);
+        return;
     }
 }
 

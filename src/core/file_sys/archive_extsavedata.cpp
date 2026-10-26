@@ -12,6 +12,7 @@
 #include "common/logging/log.h"
 #include "core/file_sys/archive_artic.h"
 #include "core/file_sys/archive_extsavedata.h"
+#include "core/file_sys/archive_source_sd_savedata.h"
 #include "core/file_sys/disk_archive.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/path_parser.h"
@@ -268,9 +269,33 @@ static Core::PerfStats::PerfArticEventBits ExtSaveDataTypeToPerfArtic(ExtSaveDat
     }
 }
 
+bool ArchiveFactory_ExtSaveData::IsDockPath(const Path& path, u64 title) const {
+    if (!dock_mode || type != ExtSaveDataType::Normal || !dock_titles.contains(title) ||
+        path.GetType() != LowPathType::Binary || path.AsBinary().size() != 12) return false;
+    const auto bytes = path.AsBinary();
+    std::array<u32_le, 3> words{};
+    std::memcpy(words.data(), bytes.data(), bytes.size());
+    return words[0] == 1 && (static_cast<u64>(words[2]) << 32 | words[1]) == dock_titles.at(title);
+}
+
 ResultVal<std::unique_ptr<ArchiveBackend>> ArchiveFactory_ExtSaveData::Open(const Path& path,
                                                                             u64 program_id) {
-    if (IsUsingArtic()) {
+    if (IsDockPath(path, program_id)) {
+        EnsureCacheCreated();
+        auto archive = ArticArchive::Open(artic_client, Service::FS::ArchiveIdCode::ExtSaveData,
+            path, Core::PerfStats::PerfArticEventBits::ARTIC_EXT_DATA, *this, false);
+        if (archive.Failed()) return archive.Code();
+        const auto key = std::make_pair(program_id, dock_titles.at(program_id));
+        if (!backed_up_extdata.contains(key)) {
+            if (!BackupDockExtData(**archive, program_id, key.second)) {
+                LOG_ERROR(Service_FS, "Console extdata backup failed; refusing writable access");
+                return ResultUnknown;
+            }
+            backed_up_extdata.insert(key);
+        }
+        return std::move(*archive);
+    }
+    if (IsUsingArtic() && !dock_mode) {
         EnsureCacheCreated();
         return ArticArchive::Open(artic_client, ExtSaveDataTypeToArchiveID(type), path,
                                   ExtSaveDataTypeToPerfArtic(type), *this,
@@ -297,7 +322,8 @@ Result ArchiveFactory_ExtSaveData::FormatAsExtData(const Path& path,
                                                    const FileSys::ArchiveFormatInfo& format_info,
                                                    u8 unknown, u64 program_id, u64 total_size,
                                                    std::optional<std::span<const u8>> icon) {
-    if (IsUsingArtic()) {
+    if (IsDockPath(path, program_id)) return ResultUnsupportedOpenFlags;
+    if (IsUsingArtic() && !dock_mode) {
         if (!icon.has_value()) {
             LOG_ERROR(Service_FS, "No icon provided while using Artic Base");
             return ResultUnknown;
@@ -353,7 +379,11 @@ Result ArchiveFactory_ExtSaveData::FormatAsExtData(const Path& path,
 
 Result ArchiveFactory_ExtSaveData::DeleteExtData(Service::FS::MediaType media_type, u8 unknown,
                                                  u32 high, u32 low) {
-    if (IsUsingArtic()) {
+    if (dock_mode && media_type == Service::FS::MediaType::SDMC) {
+        const u64 id = static_cast<u64>(high) << 32 | low;
+        for (const auto& [title, expected] : dock_titles) if (id == expected) return ResultUnsupportedOpenFlags;
+    }
+    if (IsUsingArtic() && !dock_mode) {
         Service::FS::ExtSaveDataInfo artic_extdata_path;
 
         artic_extdata_path.media_type = static_cast<u8>(media_type);
@@ -393,7 +423,7 @@ Result ArchiveFactory_ExtSaveData::DeleteExtData(Service::FS::MediaType media_ty
 
 ResultVal<ArchiveFormatInfo> ArchiveFactory_ExtSaveData::GetFormatInfo(const Path& path,
                                                                        u64 program_id) const {
-    if (IsUsingArtic()) {
+    if (IsDockPath(path, program_id) || (IsUsingArtic() && !dock_mode)) {
         auto req = artic_client->NewRequest("FSUSER_GetFormatInfo");
 
         req.AddParameterS32(static_cast<u32>(ExtSaveDataTypeToArchiveID(type)));

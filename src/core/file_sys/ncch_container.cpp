@@ -126,6 +126,23 @@ static bool LZSS_Decompress(std::span<const u8> compressed, std::span<u8> decomp
     return true;
 }
 
+bool NCCHContainer::DecompressExeFSCode(std::span<const u8> compressed,
+                                      std::vector<u8>& output, std::size_t maximum_size) {
+    if (compressed.size() < 8 || compressed.size() > maximum_size) {
+        return false;
+    }
+    const auto size = LZSS_GetDecompressedSize(compressed);
+    if (size < compressed.size() || size > maximum_size) {
+        return false;
+    }
+    std::vector<u8> decoded(size);
+    if (!LZSS_Decompress(compressed, decoded)) {
+        return false;
+    }
+    output = std::move(decoded);
+    return true;
+}
+
 std::unique_ptr<FileUtil::IOFileBase> NCCHContainer::AutoOpenNCCHNCSD(const std::string& filepath) {
     std::unique_ptr<FileUtil::IOFileBase> file = std::make_unique<FileUtil::IOFile>(filepath, "rb");
     return AutoOpenNCCHNCSD(file.get());

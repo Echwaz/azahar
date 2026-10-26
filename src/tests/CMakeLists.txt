@@ -4,6 +4,8 @@ add_executable(tests
     common/param_package.cpp
     core/core_timing.cpp
     core/file_sys/path_parser.cpp
+    core/file_sys/ncch_file.cpp
+    core/hle/notification_queue.cpp
     core/hle/kernel/hle_ipc.cpp
     core/memory/memory.cpp
     core/memory/vm_manager.cpp
@@ -37,6 +39,17 @@ if (ENABLE_LIBRETRO)
 endif()
 
 add_test(NAME tests COMMAND tests)
+add_executable(artic_core_probe EXCLUDE_FROM_ALL ../../tools/artic_dock_probe/core_session_probe.cpp)
+if(ENABLE_SDL2)
+    add_executable(artic_controller_probe EXCLUDE_FROM_ALL ../../tools/artic_dock_probe/controller_probe.cpp)
+    target_compile_definitions(artic_controller_probe PRIVATE SDL_MAIN_HANDLED)
+    target_link_libraries(artic_controller_probe PRIVATE input_common SDL2::SDL2)
+endif()
+target_link_libraries(artic_core_probe PRIVATE citra_common citra_core video_core audio_core
+                                            ${PLATFORM_LIBRARIES} Threads::Threads)
+if(MSVC)
+    target_link_options(artic_core_probe PRIVATE /STACK:8388608)
+endif()
 if(NOT ANDROID AND (CMAKE_SYSTEM_NAME STREQUAL CMAKE_HOST_SYSTEM_NAME))
     catch_discover_tests(tests)
 endif()

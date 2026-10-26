@@ -206,6 +206,7 @@ if (ENABLE_VULKAN)
 endif()
 
 if(ENABLE_SDL2)
+    target_compile_definitions(video_core PRIVATE ENABLE_SDL2)
     target_link_libraries(video_core PRIVATE SDL2::SDL2)
 endif()
 

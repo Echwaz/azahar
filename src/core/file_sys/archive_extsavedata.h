@@ -5,6 +5,8 @@
 #pragma once
 
 #include <memory>
+#include <map>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -61,11 +63,22 @@ public:
         artic_client = client;
     }
 
+    void RegisterArticDock(std::shared_ptr<Network::ArticBase::Client>& client, u64 title, u64 id) {
+        artic_client = client;
+        dock_mode = true;
+        if (id) dock_titles[title] = id;
+    }
+
     bool IsUsingArtic() const {
         return artic_client.get() != nullptr;
     }
 
 private:
+    bool IsDockPath(const Path& path, u64 title) const;
+    bool dock_mode = false;
+    std::map<u64, u64> dock_titles;
+    std::set<std::pair<u64, u64>> backed_up_extdata;
+
     /// Type of ext save data archive being accessed.
     ExtSaveDataType type;
 

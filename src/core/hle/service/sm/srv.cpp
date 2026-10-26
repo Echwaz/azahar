@@ -3,6 +3,9 @@
 // Refer to the misc/licenses/gplv2.txt file included.
 
 #include <tuple>
+#include <chrono>
+#include <boost/serialization/set.hpp>
+#include <boost/serialization/deque.hpp>
 #include <boost/serialization/shared_ptr.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/serialization/unordered_map.hpp>
@@ -10,6 +13,10 @@
 #include "common/common_types.h"
 #include "common/logging/log.h"
 #include "core/core.h"
+#include "core/core_timing.h"
+#include "core/hle/kernel/thread.h"
+#include "core/hle/kernel/process.h"
+#include "network/artic_base/title_reader.h"
 #include "core/hle/ipc.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/client_port.h"
@@ -34,10 +41,84 @@ void SRV::serialize(Archive& ar, const unsigned int) {
     DEBUG_SERIALIZATION_POINT;
     ar& boost::serialization::base_object<Kernel::SessionRequestHandler>(*this);
     ar & notification_semaphore;
+    ar & notifications;
     ar & get_service_handle_delayed_map;
 }
 
 constexpr int MAX_PENDING_NOTIFICATIONS = 16;
+
+static u32 NotificationPid(Kernel::HLERequestContext& ctx) {
+    return ctx.ClientThread()->owner_process.lock()->process_id;
+}
+
+void SRV::PublishNotification(u32 id, bool once) {
+    for (auto& [pid, state] : notifications) {
+        if (state.queue.Push(id, once) && state.semaphore) {
+            s32 previous = 0;
+            state.semaphore->Release(&previous, 1);
+        }
+    }
+}
+
+void SRV::StartArticCartridgeMonitor(std::shared_ptr<Network::ArticBase::Client> client) {
+    if (cartridge_thread.joinable()) return;
+    cartridge_client = std::move(client);
+    const auto initial = Network::ArticBase::TitleReader(cartridge_client, {}).ReadGameCardStatus();
+    if (initial) system.SetArticCartridgeTitle(*initial);
+    cartridge_event = system.CoreTiming().RegisterEvent("SRV::ArticCartridge", [this](std::uintptr_t, s64) {
+        UpdateCartridge();
+        system.CoreTiming().ScheduleEvent(msToCycles(250), cartridge_event);
+    });
+    system.CoreTiming().ScheduleEvent(msToCycles(250), cartridge_event);
+    cartridge_thread = std::jthread([this](std::stop_token stop) {
+        Network::ArticBase::TitleReader reader(cartridge_client, {});
+        while (!stop.stop_requested()) {
+            const auto status = reader.ReadGameCardStatus();
+            std::unique_lock lock(cartridge_mutex);
+            if (status) cartridge_mailbox = status;
+            cartridge_wake.wait_for(lock, stop, std::chrono::milliseconds(750), [] { return false; });
+        }
+    });
+}
+
+void SRV::StopArticCartridgeMonitor() {
+    if (cartridge_event) {
+        system.CoreTiming().UnscheduleEvent(cartridge_event, 0);
+        cartridge_event = nullptr;
+    }
+    if (cartridge_thread.joinable()) {
+        cartridge_thread.request_stop();
+        cartridge_wake.notify_all();
+        cartridge_thread.join();
+    }
+    cartridge_client.reset();
+}
+
+void SRV::UpdateCartridge() {
+    {
+        std::scoped_lock lock(cartridge_mutex);
+        if (cartridge_mailbox) {
+            pending_cartridge = cartridge_mailbox;
+            cartridge_mailbox.reset();
+        }
+    }
+    if (!pending_cartridge) return;
+    const auto previous = system.GetArticCartridgeTitle();
+    const auto next = *pending_cartridge;
+    if (previous == next) { pending_cartridge.reset(); return; }
+    if (previous) {
+        system.SetArticCartridgeTitle(std::nullopt);
+        PublishNotification(0x20A);
+        if (!next) pending_cartridge.reset();
+    } else {
+        system.SetArticCartridgeTitle(next);
+        PublishNotification(0x208);
+        pending_cartridge.reset();
+    }
+    PublishNotification(0x20B);
+    LOG_INFO(Service_SRV, "Artic cartridge changed: {:016X} -> {:016X}", previous.value_or(0), system.GetArticCartridgeTitle().value_or(0));
+}
+
 
 /**
  * SRV::RegisterClient service function
@@ -77,13 +158,13 @@ void SRV::RegisterClient(Kernel::HLERequestContext& ctx) {
 void SRV::EnableNotification(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
 
-    notification_semaphore =
-        system.Kernel().CreateSemaphore(0, MAX_PENDING_NOTIFICATIONS, "SRV:Notification").Unwrap();
-
+    auto& state = notifications[NotificationPid(ctx)];
+    if (!state.semaphore) state.semaphore = system.Kernel().CreateSemaphore(
+        static_cast<s32>(state.queue.Size()), MAX_PENDING_NOTIFICATIONS, "SRV:Notification").Unwrap();
+    notification_semaphore = state.semaphore;
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 2);
     rb.Push(ResultSuccess);
-    rb.PushCopyObjects(notification_semaphore);
-    LOG_WARNING(Service_SRV, "(STUBBED) called");
+    rb.PushCopyObjects(state.semaphore);
 }
 
 class SRV::ThreadCallback : public Kernel::HLERequestContext::WakeupCallback {
@@ -210,7 +291,7 @@ void SRV::Subscribe(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(ResultSuccess);
-    LOG_WARNING(Service_SRV, "(STUBBED) called, notification_id=0x{:X}", notification_id);
+    notifications[NotificationPid(ctx)].queue.Subscribe(notification_id);
 }
 
 /**
@@ -228,7 +309,7 @@ void SRV::Unsubscribe(Kernel::HLERequestContext& ctx) {
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
     rb.Push(ResultSuccess);
-    LOG_WARNING(Service_SRV, "(STUBBED) called, notification_id=0x{:X}", notification_id);
+    notifications[NotificationPid(ctx)].queue.Unsubscribe(notification_id);
 }
 
 /**
@@ -241,6 +322,15 @@ void SRV::Unsubscribe(Kernel::HLERequestContext& ctx) {
  *      0: 0x000C0040
  *      1: Result
  */
+void SRV::ReceiveNotification(Kernel::HLERequestContext& ctx) {
+    IPC::RequestParser rp(ctx);
+    const auto id = notifications[NotificationPid(ctx)].queue.Pop();
+    IPC::RequestBuilder rb = rp.MakeBuilder(2, 0);
+    rb.Push(id ? ResultSuccess : Result(ErrorDescription::NoData, ErrorModule::SRV,
+        ErrorSummary::WouldBlock, ErrorLevel::Temporary));
+    rb.Push(id.value_or(0));
+}
+
 void SRV::PublishToSubscriber(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
     u32 notification_id = rp.Pop<u32>();
@@ -252,8 +342,7 @@ void SRV::PublishToSubscriber(Kernel::HLERequestContext& ctx) {
     if (notification_id == 0x203) {
         system.RequestShutdown();
     } else {
-        LOG_WARNING(Service_SRV, "(STUBBED) called, notification_id=0x{:X}, flags={}",
-                    notification_id, flags);
+        PublishNotification(notification_id, (flags & 1) != 0);
     }
 
     IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
@@ -303,7 +392,7 @@ SRV::SRV(Core::System& system) : ServiceFramework("srv:", 64), system(system) {
         {0x0008, nullptr, "GetPort"},
         {0x0009, &SRV::Subscribe, "Subscribe"},
         {0x000A, &SRV::Unsubscribe, "Unsubscribe"},
-        {0x000B, nullptr, "ReceiveNotification"},
+        {0x000B, &SRV::ReceiveNotification, "ReceiveNotification"},
         {0x000C, &SRV::PublishToSubscriber, "PublishToSubscriber"},
         {0x000D, nullptr, "PublishAndGetSubscriber"},
         {0x000E, nullptr, "IsServiceRegistered"},
@@ -312,7 +401,7 @@ SRV::SRV(Core::System& system) : ServiceFramework("srv:", 64), system(system) {
     RegisterHandlers(functions);
 }
 
-SRV::~SRV() = default;
+SRV::~SRV() { StopArticCartridgeMonitor(); }
 
 } // namespace Service::SM
 
