@@ -63,6 +63,8 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     file_sys/archive_systemsavedata.cpp
     file_sys/archive_systemsavedata.h
     file_sys/artic_cache.cpp
+    file_sys/artic_disk_cache.cpp
+    file_sys/artic_disk_cache.h
     file_sys/artic_cache.h
     file_sys/certificate.cpp
     file_sys/certificate.h

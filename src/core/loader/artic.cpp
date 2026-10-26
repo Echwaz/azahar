@@ -8,12 +8,15 @@
 #include <vector>
 #include <fmt/format.h>
 #include "common/literals.h"
+#include "common/dynamic_library.h"
 #include "common/logging/log.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/file_sys/certificate.h"
+#include "core/file_sys/archive_extsavedata.h"
+#include "core/file_sys/archive_systemsavedata.h"
 #include "core/file_sys/ncch_container.h"
 #include "core/file_sys/otp.h"
 #include "core/file_sys/romfs_reader.h"
@@ -26,6 +29,8 @@
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/am/am_app.h"
 #include "core/hle/service/am/am_net.h"
+#include "core/hle/service/am/am_sys.h"
+#include "core/hle/service/am/am_u.h"
 #include "core/hle/service/apt/apt.h"
 #include "core/hle/service/cfg/cfg.h"
 #include "core/hle/service/cfg/cfg_u.h"
@@ -36,6 +41,7 @@
 #include "core/loader/artic.h"
 #include "core/loader/smdh.h"
 #include "core/memory.h"
+#include "core/hle/service/sm/srv.h"
 #include "core/system_titles.h"
 #include "network/network.h"
 
@@ -44,8 +50,9 @@ namespace Loader {
 using namespace Common::Literals;
 
 Apploader_Artic::Apploader_Artic(Core::System& system_, const std::string& server_addr,
-                                 u16 server_port, ArticInitMode init_mode)
-    : AppLoader(system_, FileUtil::IOFile()) {
+                                 u16 server_port, ArticInitMode init_mode,
+                                 std::optional<Network::ArticBase::TitleTarget> title)
+    : AppLoader(system_, FileUtil::IOFile()), selected_title(title) {
     client = std::make_shared<Network::ArticBase::Client>(server_addr, server_port);
     client->SetCommunicationErrorCallback([&system_](const std::string& msg) {
         system_.SetStatus(Core::System::ResultStatus::ErrorArticDisconnected,
@@ -63,6 +70,35 @@ Apploader_Artic::Apploader_Artic(Core::System& system_, const std::string& serve
     artic_init_mode = init_mode;
 }
 
+Apploader_Artic::Apploader_Artic(Core::System& system_,
+                                 std::shared_ptr<Network::ArticBase::Client> client_,
+                                 Network::ArticBase::TitleTarget title)
+    : AppLoader(system_, FileUtil::IOFile()), client(std::move(client_)),
+      client_connected(true), owns_client(false), selected_title(title) {}
+
+std::unique_ptr<AppLoader> Apploader_Artic::CreateTitleLoader(
+    Network::ArticBase::TitleTarget title) {
+    const auto category = title.id >> 32;
+    if (!selected_title || !client_connected || title.media > 2 ||
+        (category != 0x00040000 && category != 0x00040010 && category != 0x00040030)) {
+        return nullptr;
+    }
+    return std::unique_ptr<AppLoader>(new Apploader_Artic(system, client, title));
+}
+
+std::unique_ptr<AppLoader> Apploader_Artic::CreateResetLoader(
+    std::optional<Network::ArticBase::TitleTarget> title) {
+    if (!selected_title) {
+        return nullptr;
+    }
+    auto next = CreateTitleLoader(title.value_or(*selected_title));
+    if (next) {
+        static_cast<Apploader_Artic&>(*next).owns_client = owns_client;
+        owns_client = false;
+    }
+    return next;
+}
+
 Apploader_Artic::~Apploader_Artic() {
     // TODO(PabloMK7) Find memory leak that prevents the romfs readers being destroyed
     // when emulation stops. Looks like the mem leak comes from IVFCFile objects
@@ -77,7 +113,9 @@ Apploader_Artic::~Apploader_Artic() {
         static_cast<FileSys::ArticRomFSReader*>(update_romfs_reader.get())->CloseFile();
         update_romfs_reader.reset();
     }
-    client->Stop();
+    if (owns_client) {
+        client->Stop();
+    }
 }
 
 FileType Apploader_Artic::IdentifyType(FileUtil::IOFileBase* file) {
@@ -253,13 +291,22 @@ ResultStatus Apploader_Artic::LoadExecImpl(std::shared_ptr<Kernel::Process>& pro
 
     // On real HW this is done with FS:Reg, but we can be lazy
     auto fs_user = system.ServiceManager().GetService<Service::FS::FS_USER>("fs:USER");
-    fs_user->RegisterProgramInfo(process->process_id, process->codeset->program_id, "articbase://");
+    if (selected_title) {
+        fs_user->RegisterProgramInfo(process->process_id, process->codeset->program_id,
+                                    static_cast<Service::FS::MediaType>(selected_title->media));
+    } else {
+        fs_user->RegisterProgramInfo(process->process_id, process->codeset->program_id, "articbase://");
+    }
 
     Service::FS::FS_USER::ProductInfo product_info{};
-    if (LoadProductInfo(product_info) != ResultStatus::Success) {
+    const auto product_status = LoadProductInfo(product_info);
+    if (product_status != ResultStatus::Success &&
+        !(selected_title && product_status == ResultStatus::ErrorNotUsed)) {
         return ResultStatus::ErrorArtic;
     }
-    fs_user->RegisterProductInfo(process->process_id, product_info);
+    if (product_status == ResultStatus::Success) {
+        fs_user->RegisterProductInfo(process->process_id, product_info);
+    }
 
     process->Run(priority, stack_size);
     return ResultStatus::Success;
@@ -301,6 +348,15 @@ bool Apploader_Artic::LoadExheader() {
     if (!client_connected)
         return false;
 
+    if (selected_title) {
+        if (is_initial_setup) {
+            return false;
+        }
+        Network::ArticBase::TitleReader reader(client, *selected_title);
+        const auto data = reader.ReadExheader();
+        return data && StoreExheader(*data);
+    }
+
     auto req = client->NewRequest("Process_GetExheader");
     auto resp = client->Send(req);
     if (!resp.has_value())
@@ -310,14 +366,18 @@ bool Apploader_Artic::LoadExheader() {
     if (!exheader_buf.has_value())
         return false;
 
-    if (exheader_buf->second != sizeof(ExHeader_Header) - sizeof(ExHeader_Header::access_desc))
+    return StoreExheader({static_cast<const u8*>(exheader_buf->first), exheader_buf->second});
+}
+
+bool Apploader_Artic::StoreExheader(std::span<const u8> data) {
+    if (data.size() != sizeof(ExHeader_Header) - sizeof(ExHeader_Header::access_desc))
         return false;
 
     u8* prg_exh = reinterpret_cast<u8*>(&program_exheader);
-    memcpy(prg_exh, exheader_buf->first,
+    memcpy(prg_exh, data.data(),
            sizeof(ExHeader_Header) - sizeof(ExHeader_Header::access_desc));
     memcpy(prg_exh + offsetof(ExHeader_Header, access_desc.arm11_system_local_caps),
-           reinterpret_cast<u8*>(exheader_buf->first) +
+           data.data() +
                offsetof(ExHeader_Header, arm11_system_local_caps),
            offsetof(ExHeader_Header, access_desc) -
                offsetof(ExHeader_Header, arm11_system_local_caps));
@@ -326,6 +386,9 @@ bool Apploader_Artic::LoadExheader() {
 }
 
 ResultStatus Apploader_Artic::LoadProductInfo(Service::FS::FS_USER::ProductInfo& out_product_info) {
+    if (selected_title) {
+        return ResultStatus::ErrorNotUsed;
+    }
     if (cached_product_info.has_value()) {
         out_product_info = *cached_product_info;
         return ResultStatus::Success;
@@ -401,6 +464,56 @@ ResultStatus Apploader_Artic::Load(std::shared_ptr<Kernel::Process>& process) {
     std::string program_id{fmt::format("{:016X}", ncch_program_id)};
 
     LOG_INFO(Loader, "Program ID: {}", program_id);
+
+    if (selected_title && selected_title->id == 0x0004003000008202ULL) {
+        Network::ArticBase::TitleReader reader(client, *selected_title);
+        const auto layout = reader.ReadHomeLayout([](std::span<const u8> image)
+                -> std::optional<std::vector<u8>> {
+            Common::DynamicLibrary parser;
+            if (!parser.Load(FileUtil::GetExeDirectory() + "/" +
+                Common::DynamicLibrary::GetLibraryName("artic_home_layout"))) return std::nullopt;
+            using Extractor = int (*)(const u8*, std::size_t, u8*, std::size_t);
+            const auto extract = parser.GetSymbol<Extractor>("artic_extract_home_layout");
+            std::vector<u8> output(0x2558);
+            if (!extract || extract(image.data(), image.size(), output.data(), output.size()) != 0) {
+                return std::nullopt;
+            }
+            return output;
+        });
+        if (!layout) {
+            LOG_ERROR(Loader, "Could not read both HOME layout files from the console");
+            return ResultStatus::ErrorArtic;
+        }
+        const auto& sd_root = FileUtil::GetUserPath(FileUtil::UserPath::SDMCDir);
+        const auto nand_root = FileSys::GetSystemSaveDataContainerPath(
+            FileUtil::GetUserPath(FileUtil::UserPath::NANDDir));
+        const std::array<std::string, 2> paths{
+            FileSys::GetExtDataPathFromId(sd_root, 0x82) + "user/SaveData.dat",
+            FileSys::GetSystemSaveDataPath(nand_root,
+                FileSys::ConstructSystemSaveDataBinaryPath(0, 0x20082)) + "Launcher.dat"};
+        const std::array<const std::vector<u8>*, 2> data{&layout->first, &layout->second};
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            if (!FileUtil::Exists(paths[i]) ||
+                !FileUtil::Copy(paths[i], paths[i] + ".dock-previous")) {
+                LOG_ERROR(Loader, "Could not back up HOME layout: {}", paths[i]);
+                return ResultStatus::ErrorArtic;
+            }
+            FileUtil::IOFile staged(paths[i] + ".dock-new", "wb");
+            if (staged.WriteBytes(data[i]->data(), data[i]->size()) != data[i]->size() ||
+                !staged.Flush()) {
+                return ResultStatus::ErrorArtic;
+            }
+        }
+        for (const auto& path : paths) {
+            if (!FileUtil::Rename(path + ".dock-new", path)) {
+                for (const auto& restore : paths) {
+                    FileUtil::Copy(restore + ".dock-previous", restore);
+                }
+                return ResultStatus::ErrorArtic;
+            }
+        }
+        LOG_INFO(Loader, "Imported console HOME layout and folders; previous layout backed up");
+    }
 
     if (auto room_member = Network::GetRoomMember().lock()) {
         Network::GameInfo game_info;
@@ -581,7 +694,7 @@ ResultStatus Apploader_Artic::Load(std::shared_ptr<Kernel::Process>& process) {
         return result;
 
     system.ArchiveManager().RegisterSelfNCCH(*this);
-    if (!is_initial_setup) {
+    if (!is_initial_setup && !selected_title) {
         system.ArchiveManager().RegisterArticSaveDataSource(client);
         system.ArchiveManager().RegisterArticExtData(client);
         system.ArchiveManager().RegisterArticNCCH(client);
@@ -616,6 +729,37 @@ ResultStatus Apploader_Artic::Load(std::shared_ptr<Kernel::Process>& process) {
         }
     }
 
+    if (selected_title) {
+        if ((selected_title->id >> 32) == 0x00040000) {
+            system.ArchiveManager().RegisterArticDockSaveDataSource(
+                client, selected_title->id, selected_title->media);
+            u64 extdata_id = 0;
+            if (ReadExtdataId(extdata_id) == ResultStatus::Success && extdata_id) {
+                system.ArchiveManager().RegisterArticDockExtData(client, selected_title->id, extdata_id);
+            }
+            if (auto fs = system.ServiceManager().GetService<Service::FS::FS_USER>("fs:USER")) {
+                fs->RegisterSecureValueBackend(std::make_shared<FileSys::ArticSecureValueBackend>(
+                    client, selected_title->id, selected_title->media));
+            }
+        }
+        system.ArchiveManager().RegisterArticNCCH(client);
+        Network::ArticBase::TitleReader reader(client, *selected_title);
+        if (auto srv = system.ServiceManager().GetSRVInterface()) srv->StartArticCartridgeMonitor(client);
+        if (auto amsys = system.ServiceManager().GetService<Service::AM::AM_SYS>("am:sys")) {
+            amsys->UseArticClient(client);
+        }
+        if (auto amu = system.ServiceManager().GetService<Service::AM::AM_U>("am:u")) {
+            amu->UseArticClient(client);
+        }
+        auto amnet = system.ServiceManager().GetService<Service::AM::AM_NET>("am:net");
+        if (amnet) {
+            amnet->UseArticClient(client);
+        }
+        auto amapp = system.ServiceManager().GetService<Service::AM::AM_APP>("am:app");
+        if (amapp) {
+            amapp->UseArticClient(client);
+        }
+    }
     ParseRegionLockoutInfo(ncch_program_id);
 
     return ResultStatus::Success;
@@ -627,6 +771,35 @@ ResultStatus Apploader_Artic::IsExecutable(bool& out_executable) {
 }
 
 ResultStatus Apploader_Artic::ReadCode(std::vector<u8>& buffer) {
+    if (selected_title) {
+        if (!LoadExheader()) {
+            return ResultStatus::ErrorArtic;
+        }
+        const u64 pages = static_cast<u64>(program_exheader.codeset_info.text.num_max_pages) +
+                          program_exheader.codeset_info.ro.num_max_pages +
+                          program_exheader.codeset_info.data.num_max_pages;
+        const u64 size = pages * Memory::CITRA_PAGE_SIZE;
+        if (size == 0 || size > 64 * 1024 * 1024) {
+            return ResultStatus::ErrorInvalidFormat;
+        }
+        Network::ArticBase::TitleReader reader(client, *selected_title);
+        auto code = reader.ReadExeFS(".code");
+        if (!code) {
+            return ResultStatus::ErrorArtic;
+        }
+        if (program_exheader.codeset_info.flags.flag & 1) {
+            if (!FileSys::NCCHContainer::DecompressExeFSCode(*code, buffer, size)) {
+                return ResultStatus::ErrorInvalidFormat;
+            }
+        } else {
+            if (code->size() > size) {
+                return ResultStatus::ErrorInvalidFormat;
+            }
+            buffer = std::move(*code);
+        }
+        buffer.resize(static_cast<std::size_t>(size), 0);
+        return ResultStatus::Success;
+    }
     // Code is only read once, there is no need to cache it.
 
     EnsureClientConnected();
@@ -665,6 +838,9 @@ ResultStatus Apploader_Artic::ReadCode(std::vector<u8>& buffer) {
 
 ResultStatus Apploader_Artic::ReadIcon(std::vector<u8>& buffer,
                                        [[maybe_unused]] bool prefer_update_icon) {
+    if (selected_title) {
+        return ReadSelectedExeFS("icon", cached_icon, buffer);
+    }
     if (!cached_icon.empty()) {
         buffer = cached_icon;
         return ResultStatus::Success;
@@ -691,6 +867,9 @@ ResultStatus Apploader_Artic::ReadIcon(std::vector<u8>& buffer,
 }
 
 ResultStatus Apploader_Artic::ReadBanner(std::vector<u8>& buffer) {
+    if (selected_title) {
+        return ReadSelectedExeFS("banner", cached_banner, buffer);
+    }
     if (!cached_banner.empty()) {
         buffer = cached_banner;
         return ResultStatus::Success;
@@ -717,6 +896,9 @@ ResultStatus Apploader_Artic::ReadBanner(std::vector<u8>& buffer) {
 }
 
 ResultStatus Apploader_Artic::ReadLogo(std::vector<u8>& buffer) {
+    if (selected_title) {
+        return ReadSelectedExeFS("logo", cached_logo, buffer);
+    }
     if (!cached_logo.empty()) {
         buffer = cached_logo;
         return ResultStatus::Success;
@@ -743,6 +925,10 @@ ResultStatus Apploader_Artic::ReadLogo(std::vector<u8>& buffer) {
 }
 
 ResultStatus Apploader_Artic::ReadProgramId(u64& out_program_id) {
+    if (selected_title) {
+        out_program_id = selected_title->id;
+        return ResultStatus::Success;
+    }
     if (cached_title_id.has_value()) {
         out_program_id = *cached_title_id;
         return ResultStatus::Success;
@@ -796,12 +982,19 @@ ResultStatus Apploader_Artic::ReadExtdataId(u64& out_extdata_id) {
 }
 
 ResultStatus Apploader_Artic::ReadRomFS(std::shared_ptr<FileSys::RomFSReader>& romfs_file) {
-    main_romfs_reader = romfs_file = std::make_shared<FileSys::ArticRomFSReader>(client, false);
+    if (selected_title) {
+        EnsureClientConnected();
+        if (!client_connected) {
+            return ResultStatus::ErrorArtic;
+        }
+    }
+    main_romfs_reader = romfs_file =
+        std::make_shared<FileSys::ArticRomFSReader>(client, false, selected_title);
     return static_cast<FileSys::ArticRomFSReader*>(romfs_file.get())->OpenStatus();
 }
 
 ResultStatus Apploader_Artic::ReadUpdateRomFS(std::shared_ptr<FileSys::RomFSReader>& romfs_file) {
-    update_romfs_reader = romfs_file = std::make_shared<FileSys::ArticRomFSReader>(client, true);
+    update_romfs_reader = romfs_file = std::make_shared<FileSys::ArticRomFSReader>(client, true, selected_title);
     return static_cast<FileSys::ArticRomFSReader*>(romfs_file.get())->OpenStatus();
 }
 
@@ -811,6 +1004,26 @@ ResultStatus Apploader_Artic::DumpRomFS(const std::string& target_path) {
 
 ResultStatus Apploader_Artic::DumpUpdateRomFS(const std::string& target_path) {
     return ResultStatus::ErrorNotImplemented;
+}
+
+ResultStatus Apploader_Artic::ReadSelectedExeFS(std::string_view section, std::vector<u8>& cache,
+                                             std::vector<u8>& output) {
+    if (!cache.empty()) {
+        output = cache;
+        return ResultStatus::Success;
+    }
+    EnsureClientConnected();
+    if (!client_connected || !selected_title) {
+        return ResultStatus::ErrorArtic;
+    }
+    Network::ArticBase::TitleReader reader(client, *selected_title);
+    auto data = reader.ReadExeFS(section);
+    if (!data) {
+        return ResultStatus::ErrorNotUsed;
+    }
+    cache = std::move(*data);
+    output = cache;
+    return ResultStatus::Success;
 }
 
 ResultStatus Apploader_Artic::ReadTitle(std::string& title, bool prefer_update_title) {

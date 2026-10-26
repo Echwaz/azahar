@@ -1426,7 +1426,10 @@ Result AppletManager::PrepareToStartApplication(u64 title_id, FS::MediaType medi
 
     next_app_mediatype = media_type;
 
-    auto loader = Loader::GetLoader(path);
+    auto loader = system.CreateArticTitleLoader(title_id, static_cast<u8>(media_type));
+    if (!loader) {
+        loader = Loader::GetLoader(path);
+    }
 
     if (!loader) {
         LOG_ERROR(Service_APT, "Could not find .app for title 0x{:016x}", title_id);
@@ -1501,14 +1504,17 @@ Result AppletManager::StartApplication(const std::vector<u8>& parameter,
     // PM::LaunchTitle. We should research more about that.
     ASSERT_MSG(app_start_parameters, "Trying to start an application without preparing it first.");
 
+    const auto previous_slot = active_slot;
     active_slot = AppletSlot::Application;
 
     // Launch the title directly.
     auto process = NS::LaunchTitle(system, app_start_parameters->next_media_type,
                                    app_start_parameters->next_title_id);
     if (!process) {
-        LOG_CRITICAL(Service_APT, "Failed to launch title during application start, exiting.");
-        system.RequestShutdown();
+        LOG_ERROR(Service_APT, "Application launch failed; keeping the current Home Menu session");
+        active_slot = previous_slot;
+        app_start_parameters.reset();
+        return ResultUnknown;
     }
 
     app_start_parameters.reset();

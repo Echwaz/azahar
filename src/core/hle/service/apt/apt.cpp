@@ -1217,8 +1217,12 @@ void Module::APTInterface::GetProgramInfo(Kernel::HLERequestContext& ctx) {
 
     LOG_WARNING(Service_APT, "called title_id={:016X}, media_type={:02X}", title_id, media_type);
 
-    std::string path = Service::AM::GetTitleContentPath(media_type, title_id);
-    auto loader = Loader::GetLoader(path);
+    auto loader = apt->system.CreateArticTitleLoader(title_id, static_cast<u8>(media_type));
+    if (!loader) {
+        const auto path = media_type == Service::FS::MediaType::GameCard
+            ? apt->system.GetCartridge() : Service::AM::GetTitleContentPath(media_type, title_id);
+        loader = Loader::GetLoader(path);
+    }
     if (!loader) {
         LOG_WARNING(Service_APT, "Could not find .app for title 0x{:016x}", title_id);
 

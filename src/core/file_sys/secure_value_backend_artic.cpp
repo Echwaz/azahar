@@ -79,6 +79,10 @@ Result ArticSecureValueBackend::ControlSecureSave(u32 action, u8* input, size_t 
 
 Result ArticSecureValueBackend::SetThisSaveDataSecureValue(u32 secure_value_slot,
                                                            u64 secure_value) {
+    if (title) {
+        return ObsoletedSetSaveDataSecureValue(static_cast<u32>((title >> 8) & 0xFFFFF),
+            static_cast<u8>(title), secure_value_slot, secure_value);
+    }
     auto req = client->NewRequest("FSUSER_SetThisSaveDataSecVal");
 
     req.AddParameterU32(secure_value_slot);
@@ -89,6 +93,12 @@ Result ArticSecureValueBackend::SetThisSaveDataSecureValue(u32 secure_value_slot
 
 ResultVal<std::tuple<bool, bool, u64>> ArticSecureValueBackend::GetThisSaveDataSecureValue(
     u32 secure_value_slot) {
+    if (title) {
+        auto value = ObsoletedGetSaveDataSecureValue(static_cast<u32>((title >> 8) & 0xFFFFF),
+            static_cast<u8>(title), secure_value_slot);
+        if (value.Failed()) return value.Code();
+        return std::make_tuple(std::get<0>(*value), media == 2, std::get<1>(*value));
+    }
     auto req = client->NewRequest("FSUSER_GetThisSaveDataSecVal");
 
     req.AddParameterU32(secure_value_slot);

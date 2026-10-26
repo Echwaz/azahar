@@ -12,6 +12,7 @@
 #include "core/hle/service/fs/fs_user.h"
 #include "core/loader/loader.h"
 #include "network/artic_base/artic_base_client.h"
+#include "network/artic_base/title_reader.h"
 
 namespace Loader {
 
@@ -24,9 +25,13 @@ public:
         N3DS,
     };
     Apploader_Artic(Core::System& system_, const std::string& server_addr, u16 server_port,
-                    ArticInitMode init_mode);
+                    ArticInitMode init_mode,
+                    std::optional<Network::ArticBase::TitleTarget> title = std::nullopt);
 
     ~Apploader_Artic() override;
+    std::unique_ptr<AppLoader> CreateTitleLoader(Network::ArticBase::TitleTarget title);
+    std::unique_ptr<AppLoader> CreateResetLoader(
+        std::optional<Network::ArticBase::TitleTarget> title);
 
     /**
      * Returns the type of the file
@@ -95,6 +100,8 @@ public:
     }
 
 private:
+    Apploader_Artic(Core::System& system_, std::shared_ptr<Network::ArticBase::Client> client_,
+                    Network::ArticBase::TitleTarget title);
     static constexpr u32 SETUP_TOOL_VERSION = 2;
     /**
      * Loads .code section into memory for booting
@@ -112,6 +119,9 @@ private:
     void ParseRegionLockoutInfo(u64 program_id);
 
     bool LoadExheader();
+    bool StoreExheader(std::span<const u8> data);
+    ResultStatus ReadSelectedExeFS(std::string_view section, std::vector<u8>& cache,
+                                  std::vector<u8>& output);
 
     ResultStatus LoadProductInfo(Service::FS::FS_USER::ProductInfo& out);
 
@@ -133,6 +143,8 @@ private:
     std::string server_address;
     std::shared_ptr<Network::ArticBase::Client> client;
     bool client_connected = false;
+    bool owns_client = true;
+    std::optional<Network::ArticBase::TitleTarget> selected_title;
 
     std::shared_ptr<FileSys::RomFSReader> main_romfs_reader = nullptr;
     std::shared_ptr<FileSys::RomFSReader> update_romfs_reader = nullptr;

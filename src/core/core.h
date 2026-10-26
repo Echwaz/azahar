@@ -343,6 +343,9 @@ public:
         return *app_loader;
     }
 
+    std::unique_ptr<Loader::AppLoader> CreateArticTitleLoader(u64 title_id, u8 media);
+    bool RequestArticTitleReset(u64 title_id, u8 media, std::optional<u8> mem_mode);
+
     /// Frontend Applets
 
     void RegisterMiiSelector(std::shared_ptr<Frontend::MiiSelector> mii_selector);
@@ -410,6 +413,14 @@ public:
 
     const std::string& GetCartridge() const {
         return inserted_cartridge;
+    }
+
+    std::optional<u64> GetArticCartridgeTitle() const {
+        return artic_cartridge_title;
+    }
+
+    void SetArticCartridgeTitle(std::optional<u64> title) {
+        artic_cartridge_title = title;
     }
 
     bool IsInitialSetup();
@@ -484,6 +495,7 @@ private:
 
     /// Path for current inserted cartridge
     std::string inserted_cartridge;
+    std::optional<u64> artic_cartridge_title;
 
     /// ARM11 CPU core
     std::vector<std::shared_ptr<ARM_Interface>> cpu_cores;
@@ -551,6 +563,7 @@ private:
     Frontend::EmuWindow* m_secondary_window;
     std::string m_filepath;
     std::string m_chainloadpath;
+    std::optional<std::pair<u64, u8>> requested_artic_title;
     std::optional<u8> m_mem_mode;
     u64 title_id;
 

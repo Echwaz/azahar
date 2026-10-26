@@ -51,6 +51,8 @@ public:
 
     explicit ServiceManager(Core::System& system);
 
+    std::shared_ptr<SRV> GetSRVInterface() const { return srv_interface.lock(); }
+
     Result RegisterService(std::shared_ptr<Kernel::ServerPort>* out_server_port, std::string name,
                            u32 max_sessions);
     Result GetServicePort(std::shared_ptr<Kernel::ClientPort>* out_client_port,

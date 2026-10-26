@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 #include "common/bit_field.h"
@@ -243,6 +244,9 @@ public:
     NCCHContainer(const std::string& filepath, u32 partition = 0);
     NCCHContainer(FileUtil::IOFileBase* file, u32 partition = 0);
     NCCHContainer() {}
+
+    static bool DecompressExeFSCode(std::span<const u8> compressed, std::vector<u8>& output,
+                                   std::size_t maximum_size);
 
     Loader::ResultStatus OpenFile(const std::string& filepath, u32 ncch_offset = 0,
                                   u32 partition = 0);

@@ -19,7 +19,10 @@ std::shared_ptr<Kernel::Process> LaunchTitle(Core::System& system, FS::MediaType
         path = AM::GetTitleContentPath(media_type, title_id);
     }
 
-    auto loader = Loader::GetLoader(path);
+    auto loader = system.CreateArticTitleLoader(title_id, static_cast<u8>(media_type));
+    if (!loader) {
+        loader = Loader::GetLoader(path);
+    }
     u64 program_id;
 
     if (!loader || loader->ReadProgramId(program_id) != Loader::ResultStatus::Success ||
@@ -61,7 +64,8 @@ std::shared_ptr<Kernel::Process> LaunchTitle(Core::System& system, FS::MediaType
     Loader::ResultStatus result = loader->Load(process);
 
     if (result != Loader::ResultStatus::Success) {
-        LOG_WARNING(Service_NS, "Error loading .app for title 0x{:016x}", title_id);
+        LOG_WARNING(Service_NS, "Error loading .app for title 0x{:016x}, loader status={}",
+                    title_id, static_cast<int>(result));
         return nullptr;
     }
 
@@ -70,6 +74,13 @@ std::shared_ptr<Kernel::Process> LaunchTitle(Core::System& system, FS::MediaType
 
 void RebootToTitle(Core::System& system, FS::MediaType media_type, u64 title_id,
                    std::optional<Kernel::MemoryMode> mem_mode) {
+    std::optional<u8> mem_mode_u8;
+    if (mem_mode) {
+        mem_mode_u8 = static_cast<u8>(mem_mode.value());
+    }
+    if (system.RequestArticTitleReset(title_id, static_cast<u8>(media_type), mem_mode_u8)) {
+        return;
+    }
     std::string new_path;
     if (media_type == FS::MediaType::GameCard) {
         new_path = system.GetCartridge();
@@ -86,10 +97,6 @@ void RebootToTitle(Core::System& system, FS::MediaType media_type, u64 title_id,
         new_path.clear();
     }
 
-    std::optional<u8> mem_mode_u8;
-    if (mem_mode) {
-        mem_mode_u8 = static_cast<u8>(mem_mode.value());
-    }
     system.RequestReset(new_path, mem_mode_u8);
 }
 

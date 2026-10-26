@@ -15,8 +15,10 @@
 #include "core/hle/service/am/am.h"
 #include "core/loader/3dsx.h"
 #include "core/loader/artic.h"
+#include "core/loader/artic_home_address.h"
 #include "core/loader/elf.h"
 #include "core/loader/ncch.h"
+#include "core/system_titles.h"
 
 namespace Loader {
 
@@ -117,6 +119,22 @@ static std::unique_ptr<AppLoader> GetFileLoader(Core::System& system, FileUtil::
         return std::make_unique<AppLoader_NCCH>(system, std::move(file), filepath);
 
     case FileType::ARTIC: {
+        if (filename.starts_with("artichome://")) {
+            const auto address = ParseArticHomeAddress(filename);
+            if (!address) {
+                return nullptr;
+            }
+            bool known_home = false;
+            for (u32 region = 0; region < Core::NUM_SYSTEM_TITLE_REGIONS; ++region) {
+                known_home |= Core::GetHomeMenuTitleId(region) == address->title;
+            }
+            if (!known_home) {
+                return nullptr;
+            }
+            return std::make_unique<Apploader_Artic>(
+                system, address->host, address->port, Apploader_Artic::ArticInitMode::NONE,
+                Network::ArticBase::TitleTarget{address->title, 0});
+        }
         Apploader_Artic::ArticInitMode mode = Apploader_Artic::ArticInitMode::NONE;
         if (filename.starts_with("articinio://")) {
             mode = Apploader_Artic::ArticInitMode::O3DS;
@@ -151,7 +169,7 @@ static std::unique_ptr<AppLoader> GetFileLoader(Core::System& system, FileUtil::
 
 std::unique_ptr<AppLoader> GetLoader(const std::string& filename) {
     if (filename.starts_with("articbase://") || filename.starts_with("articinio://") ||
-        filename.starts_with("articinin://")) {
+        filename.starts_with("articinin://") || filename.starts_with("artichome://")) {
         return GetFileLoader(Core::System::GetInstance(), FileUtil::IOFile(), FileType::ARTIC,
                              filename, "");
     }

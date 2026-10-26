@@ -29,6 +29,7 @@
 #include "core/cheats/cheats.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/service/sm/srv.h"
 #include "core/dumping/backend.h"
 #include "core/file_sys/ncch_container.h"
 #include "core/frontend/image_interface.h"
@@ -53,6 +54,7 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/hw/aes/key.h"
 #include "core/loader/loader.h"
+#include "core/loader/artic.h"
 #include "core/movie.h"
 #include "core/savestate.h"
 #ifdef ENABLE_SCRIPTING
@@ -792,11 +794,18 @@ void System::RegisterImageInterface(std::shared_ptr<Frontend::ImageInterface> im
 }
 
 void System::Shutdown(bool is_deserializing) {
+    std::unique_ptr<Loader::AppLoader> retiring_loader;
+    requested_artic_title.reset();
+    artic_cartridge_title.reset();
 
 #ifdef ENABLE_SCRIPTING
     // Stop the RPC server before anything its requests may touch is torn down
     rpc_server.reset();
 #endif
+
+    if (service_manager) {
+        if (auto srv = service_manager->GetSRVInterface()) srv->StopArticCartridgeMonitor();
+    }
 
     // Shutdown emulation session
     is_powered_on = false;
@@ -808,7 +817,7 @@ void System::Shutdown(bool is_deserializing) {
         GDBStub::Shutdown();
 #endif
         perf_stats.reset();
-        app_loader.reset();
+        retiring_loader = std::move(app_loader);
     }
     custom_tex_manager.reset();
     archive_manager.reset();
@@ -853,7 +862,20 @@ void System::Reset() {
 
     restore_ipc_recorder = std::move(kernel->BackupIPCRecorder());
 
+    std::unique_ptr<Loader::AppLoader> next_artic_loader;
+    if (m_chainloadpath.empty() && app_loader &&
+        app_loader->GetFileType() == Loader::FileType::ARTIC) {
+        std::optional<Network::ArticBase::TitleTarget> target;
+        if (requested_artic_title) {
+            target = Network::ArticBase::TitleTarget{requested_artic_title->first,
+                                                    requested_artic_title->second};
+        }
+        next_artic_loader = static_cast<Loader::Apploader_Artic&>(*app_loader).CreateResetLoader(target);
+    }
     Shutdown();
+    if (next_artic_loader) {
+        early_app_loader = std::move(next_artic_loader);
+    }
 
     if (!m_chainloadpath.empty()) {
         m_filepath = m_chainloadpath;
@@ -921,6 +943,22 @@ void System::ApplySettings() {
         plg_ldr->SetEnabled(Settings::values.plugin_loader_enabled.GetValue());
         plg_ldr->SetAllowGameChangeState(Settings::values.allow_plugin_loader.GetValue());
     }
+}
+
+std::unique_ptr<Loader::AppLoader> System::CreateArticTitleLoader(u64 title_id, u8 media) {
+    if (app_loader && app_loader->GetFileType() == Loader::FileType::ARTIC) {
+        return static_cast<Loader::Apploader_Artic&>(*app_loader).CreateTitleLoader({title_id, media});
+    }
+    return nullptr;
+}
+
+bool System::RequestArticTitleReset(u64 title_id, u8 media, std::optional<u8> mem_mode) {
+    if (!CreateArticTitleLoader(title_id, media)) {
+        return false;
+    }
+    requested_artic_title = std::make_pair(title_id, media);
+    RequestReset("", mem_mode);
+    return true;
 }
 
 void System::RegisterAppLoaderEarly(std::unique_ptr<Loader::AppLoader>& loader) {

@@ -1,0 +1,4 @@
+libsave3ds: https://github.com/wwylele/save3ds
+Commit: 4627a45ab239780951bed2331933facfdf7d5392
+Dual licensed under MIT OR Apache-2.0; see included licenses.
+Local changes expose modules and APIs used by the Home Menu parser.

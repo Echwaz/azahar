@@ -56,6 +56,7 @@ public:
     // On real HW this is part of FSReg (FSReg:Register). But since that module is only used by
     // loader and pm, which we HLEed, we can just directly use it here
     void RegisterProgramInfo(u32 process_id, u64 program_id, const std::string& filepath);
+    void RegisterProgramInfo(u32 process_id, u64 program_id, MediaType media_type);
 
     std::string GetRegisteredGamecardPath() const;
 

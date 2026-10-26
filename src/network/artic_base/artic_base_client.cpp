@@ -8,6 +8,7 @@
 
 #include "algorithm"
 #include "chrono"
+#include <cstdlib>
 #include "limits.h"
 #include "memory"
 #include "sstream"
@@ -285,6 +286,12 @@ bool Client::Connect() {
         return false;
     }
 
+    const int no_delay = 1;
+    if (::setsockopt(main_socket, IPPROTO_TCP, TCP_NODELAY,
+                     reinterpret_cast<const char*>(&no_delay), sizeof(no_delay)) != 0) {
+        LOG_WARNING(Network, "Could not enable TCP_NODELAY for Artic control socket");
+    }
+
     auto version = SendSimpleRequest("VERSION");
     if (version.has_value()) {
         int version_value = str_to_int(*version);
@@ -446,15 +453,25 @@ void Client::StopImpl(bool from_error) {
 }
 
 std::optional<std::pair<void*, size_t>> Client::Response::GetResponseBuffer(u32 buffer_id) const {
+    // ResizeLastResultBuffer removes the buffer header as well when its size becomes zero.
+    if (resp_data_size == 0 && buffer_id == 0) {
+        static u8 empty_buffer = 0;
+        return std::make_pair(static_cast<void*>(&empty_buffer), size_t{0});
+    }
     if (!resp_data_buffer)
         return std::nullopt;
 
     char* resp_data_buffer_end = resp_data_buffer + resp_data_size;
     char* resp_data_buffer_start = resp_data_buffer;
-    while (resp_data_buffer_start + sizeof(ArticBaseCommon::Buffer) < resp_data_buffer_end) {
+    while (static_cast<size_t>(resp_data_buffer_end - resp_data_buffer_start) >=
+           sizeof(ArticBaseCommon::Buffer)) {
         ArticBaseCommon::Buffer* curr_buffer =
             reinterpret_cast<ArticBaseCommon::Buffer*>(resp_data_buffer_start);
         resp_data_buffer_start += sizeof(ArticBaseCommon::Buffer);
+        if (curr_buffer->bufferSize >
+            static_cast<size_t>(resp_data_buffer_end - resp_data_buffer_start)) {
+            return std::nullopt;
+        }
         if (curr_buffer->bufferID == buffer_id) {
             if (curr_buffer->data + curr_buffer->bufferSize <= resp_data_buffer_end) {
                 return std::make_pair(curr_buffer->data, curr_buffer->bufferSize);
@@ -471,6 +488,10 @@ std::optional<Client::Response> Client::Send(Request& request) {
     if (stopped)
         return std::nullopt;
 
+    const bool trace = std::getenv("ARTIC_TRACE_RPC") != nullptr;
+    const auto trace_start = std::chrono::steady_clock::now();
+    if (trace) LOG_INFO(Network, "Artic RPC begin id={} method={}",
+        request.request_packet.requestID, request.method_name);
     request.request_packet.parameterCount = static_cast<u32>(request.parameters.size());
     PendingResponse resp(request);
 
@@ -489,6 +510,10 @@ std::optional<Client::Response> Client::Send(Request& request) {
     std::unique_lock cv_lk(resp.cv_mutex);
     resp.cv.wait(cv_lk, [&resp]() { return resp.is_done; });
 
+    if (trace) LOG_INFO(Network, "Artic RPC end id={} method={} result={:08X} elapsed_ms={}",
+        request.request_packet.requestID, request.method_name, resp.response.methodResult,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - trace_start).count());
     return std::optional<Client::Response>(std::move(resp.response));
 }
 
@@ -741,6 +766,12 @@ void Client::Handler::RunLoop() {
         LOG_ERROR(Network, "Failed to connect");
         client.SignalCommunicationError();
         return;
+    }
+
+    const int no_delay = 1;
+    if (::setsockopt(handler_socket, IPPROTO_TCP, TCP_NODELAY,
+                     reinterpret_cast<const char*>(&no_delay), sizeof(no_delay)) != 0) {
+        LOG_WARNING(Network, "Could not enable TCP_NODELAY for Artic worker socket");
     }
 
     const auto signal_error = [&] {

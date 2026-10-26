@@ -466,6 +466,18 @@ void ArchiveManager::RegisterArticSaveDataSource(
     sd_savedata_source->RegisterArtic(client);
 }
 
+void ArchiveManager::RegisterArticDockSaveDataSource(
+    std::shared_ptr<Network::ArticBase::Client>& client, u64 title, u8 media) {
+    if (sd_savedata_source) sd_savedata_source->RegisterArticDock(client, title, media);
+}
+
+void ArchiveManager::RegisterArticDockExtData(
+    std::shared_ptr<Network::ArticBase::Client>& client, u64 title, u64 id) {
+    const auto entry = id_code_map.find(ArchiveIdCode::ExtSaveData);
+    if (entry != id_code_map.end())
+        static_cast<FileSys::ArchiveFactory_ExtSaveData*>(entry->second.get())->RegisterArticDock(client, title, id);
+}
+
 void ArchiveManager::RegisterArticExtData(std::shared_ptr<Network::ArticBase::Client>& client) {
     for (auto it : {ArchiveIdCode::ExtSaveData, ArchiveIdCode::SharedExtSaveData,
                     ArchiveIdCode::BossExtSaveData}) {

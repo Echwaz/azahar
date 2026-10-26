@@ -1941,6 +1941,8 @@ void Module::Interface::GetNumPrograms(Kernel::HLERequestContext& ctx) {
                 }
 
                 async_data->res = *count;
+                LOG_DEBUG(Service_AM, "Artic media_type={} title_count={}",
+                          async_data->media_type, *count);
                 return 0;
             },
             [async_data](Kernel::HLERequestContext& ctx) {
@@ -2356,6 +2358,9 @@ void Module::Interface::GetProgramList(Kernel::HLERequestContext& ctx) {
 
                 async_data->out.resize(title_ids->second);
                 memcpy(async_data->out.data(), title_ids->first, title_ids->second);
+                LOG_DEBUG(Service_AM, "Artic media_type={} requested={} returned={}",
+                          async_data->media_type, async_data->count,
+                          async_data->out.size() / sizeof(u64));
                 return 0;
             },
             [async_data](Kernel::HLERequestContext& ctx) {
@@ -3180,6 +3185,27 @@ void Module::Interface::GetNumTickets(Kernel::HLERequestContext& ctx) {
 
     LOG_DEBUG(Service_AM, "");
 
+    if (artic_client) {
+        auto result = std::make_shared<ResultVal<u32>>(ResultUnknown);
+        ctx.RunAsync(
+            [this, result](Kernel::HLERequestContext&) {
+                auto req = artic_client->NewRequest("AM_GetTicketCount");
+                auto response = artic_client->Send(req);
+                if (!response || !response->Succeeded()) return 0;
+                const Result status(static_cast<u32>(response->GetMethodResult()));
+                if (status.IsError()) { *result = status; return 0; }
+                auto count = response->GetResponseS32(0);
+                if (count && *count >= 0) *result = static_cast<u32>(*count);
+                return 0;
+            },
+            [result](Kernel::HLERequestContext& context) {
+                IPC::RequestBuilder rb(context, 2, 0);
+                rb.Push(result->Code());
+                rb.Push<u32>(result->Succeeded() ? result->Unwrap() : 0);
+            }, true);
+        return;
+    }
+
     std::scoped_lock lock(am->am_lists_mutex);
     u32 ticket_count = static_cast<u32>(am->am_ticket_list.size());
 
@@ -3195,6 +3221,45 @@ void Module::Interface::GetTicketList(Kernel::HLERequestContext& ctx) {
     auto& ticket_tids_out = rp.PopMappedBuffer();
 
     LOG_DEBUG(Service_AM, "ticket_list_count={}, ticket_index={}", ticket_list_count, ticket_index);
+
+    if (artic_client) {
+        struct TicketResult {
+            Result status = ResultUnknown;
+            std::vector<u8> data;
+            Kernel::MappedBuffer* output;
+        };
+        auto result = std::make_shared<TicketResult>();
+        result->output = &ticket_tids_out;
+        ctx.RunAsync(
+            [this, result, ticket_list_count, ticket_index](Kernel::HLERequestContext&) {
+                if (ticket_list_count > 8192 || ticket_index > 0x7FFFFFFF) return 0;
+                auto req = artic_client->NewRequest("AM_GetTicketList");
+                req.AddParameterU32(ticket_list_count);
+                req.AddParameterU32(ticket_index);
+                auto response = artic_client->Send(req);
+                if (!response || !response->Succeeded()) return 0;
+                const Result status(static_cast<u32>(response->GetMethodResult()));
+                if (status.IsError()) { result->status = status; return 0; }
+                auto buffer = response->GetResponseBuffer(0);
+                if (!buffer || buffer->second % sizeof(u64) != 0 ||
+                    buffer->second / sizeof(u64) > ticket_list_count ||
+                    buffer->second > result->output->GetSize()) return 0;
+                const auto* data = static_cast<const u8*>(buffer->first);
+                if (buffer->second != 0) result->data.assign(data, data + buffer->second);
+                result->status = ResultSuccess;
+                return 0;
+            },
+            [result](Kernel::HLERequestContext& context) {
+                if (result->status.IsSuccess() && !result->data.empty()) {
+                    result->output->Write(result->data.data(), 0, result->data.size());
+                }
+                IPC::RequestBuilder rb(context, 2, 2);
+                rb.Push(result->status);
+                rb.Push<u32>(static_cast<u32>(result->data.size() / sizeof(u64)));
+                rb.PushMappedBuffer(*result->output);
+            }, true);
+        return;
+    }
 
     u32 tickets_written = 0;
     std::scoped_lock lock(am->am_lists_mutex);

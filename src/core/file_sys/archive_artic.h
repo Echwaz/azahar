@@ -24,10 +24,10 @@ public:
     explicit ArticArchive(std::shared_ptr<Network::ArticBase::Client>& _client, s64 _archive_handle,
                           Core::PerfStats::PerfArticEventBits _report_artic_event,
                           ArticCacheProvider& _cache_provider, const Path& _archive_path,
-                          bool _clear_cache_on_close)
+                          bool _clear_cache_on_close, bool _ncch_archive = false)
         : client(_client), archive_handle(_archive_handle), report_artic_event(_report_artic_event),
           cache_provider(&_cache_provider), archive_path(_archive_path),
-          clear_cache_on_close(_clear_cache_on_close) {
+          clear_cache_on_close(_clear_cache_on_close), ncch_archive(_ncch_archive) {
         open_reporter = std::make_shared<OpenFileReporter>(_client, _report_artic_event);
     }
     ~ArticArchive() override;
@@ -163,6 +163,7 @@ private:
     ArticCacheProvider* cache_provider = nullptr;
     Path archive_path;
     bool clear_cache_on_close;
+    bool ncch_archive = false;
 
     template <class Archive>
     void serialize(Archive& ar, const unsigned int) {
@@ -240,6 +241,7 @@ public:
 
     u32 Read(const u32 count, Entry* entries) override;
     bool Close() override;
+    bool ReadFailed() const { return read_failed; }
 
     bool IsSlow() override {
         return true;
@@ -251,6 +253,7 @@ protected:
 private:
     std::shared_ptr<Network::ArticBase::Client> client;
     s32 dir_handle;
+    bool read_failed = false;
     Path archive_path;
     std::shared_ptr<ArticArchive::OpenFileReporter> open_reporter;
 
